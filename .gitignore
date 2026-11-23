@@ -1,0 +1,9 @@
+node_modules/
+.env
+backend/**/bin/
+backend/**/obj/
+backend/SuperWater.Api/wwwroot/
+publish/
+.vs/
+*.user
+backend/SuperWater.Api/appsettings.Development.json
