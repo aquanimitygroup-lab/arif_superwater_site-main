@@ -40,8 +40,11 @@ public interface IPaymentGateway
     Task<HandleResult> Handle(string action, Dictionary<string, string> query, JsonObject body, Db db);
 }
 
-public sealed class Gateways(IEnumerable<IPaymentGateway> gateways)
+public sealed class Gateways(IEnumerable<IPaymentGateway> gateways, PaymentSettings settings)
 {
+    /// <summary>Reads the latest keys saved in the admin (cached for a few seconds). Call before using Configured().</summary>
+    public Task Load(Db db, bool force = false) => settings.Refresh(db, force);
+
     public const string CodId = "cod";
     public const string CodLabel = "Cash on delivery";
 

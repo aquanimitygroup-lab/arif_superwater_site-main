@@ -23,3 +23,5 @@ tr.total td { border: 0; font-weight: 900; font-size: 18px; padding-top: 14px; }
 .steps i { flex: 1; height: 6px; border-radius: 99px; background: var(--line); }
 .steps i.on { background: var(--cyan); }
 .steps-label { display: flex; justify-content: space-between; font-size: 12px; font-weight: 700; color: var(--ink-2); }
+.o-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.o-actions .rc-btn { flex: 1 1 160px; }

@@ -21,10 +21,10 @@ namespace SuperWater.Api.Payments;
 /// IPN address server-to-server. A payment only counts once the validation API
 /// confirms it (status VALID or VALIDATED) for the right order and amount.
 /// </summary>
-public sealed class SslCommerzGateway(IConfiguration config) : IPaymentGateway
+public sealed class SslCommerzGateway(PaymentSettings config) : IPaymentGateway
 {
-    private string Env(string k) => (config[k] ?? "").Trim();
-    // SSLCOMMERZ_BASE_URL is only for automated tests; leave it unset.
+    private string Env(string k) => config.Get(k);
+    // SSLCOMMERZ_BASE_URL: optional API link set in Admin → Payments; empty uses SSLCommerz's own address.
     private string Base => Env("SSLCOMMERZ_BASE_URL") is { Length: > 0 } b ? b
         : Env("SSLCOMMERZ_LIVE") == "true" ? "https://securepay.sslcommerz.com" : "https://sandbox.sslcommerz.com";
 
@@ -32,7 +32,7 @@ public sealed class SslCommerzGateway(IConfiguration config) : IPaymentGateway
     public string Label => "Card or mobile banking (SSLCommerz)";
     public bool NeedsEmail => true;
 
-    public bool Configured() => Env("SSLCOMMERZ_STORE_ID").Length > 0 && Env("SSLCOMMERZ_STORE_PASSWORD").Length > 0;
+    public bool Configured() => config.Enabled("SSLCOMMERZ") && Env("SSLCOMMERZ_STORE_ID").Length > 0 && Env("SSLCOMMERZ_STORE_PASSWORD").Length > 0;
 
     public async Task<StartResult> Start(Order order, Func<string, string> returnUrl, Db db)
     {

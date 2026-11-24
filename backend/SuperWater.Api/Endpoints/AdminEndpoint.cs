@@ -33,6 +33,9 @@ public static class AdminEndpoint
         var auth = sp.GetRequiredService<Auth>();
         var orders = sp.GetRequiredService<Orders>();
         var gateways = sp.GetRequiredService<Gateways>();
+        var paySettings = sp.GetRequiredService<PaymentSettings>();
+        var mailSettings = sp.GetRequiredService<MailSettings>();
+        var mailer = sp.GetRequiredService<OrderMailer>();
 
         // ---------- sign in / out ----------
         if (action == "login")
@@ -53,6 +56,8 @@ public static class AdminEndpoint
         if (action == "logout") { await Http.Send(ctx, 200, new { ok = true }, new Dictionary<string, string> { ["Set-Cookie"] = Auth.ClearCookie() }); return; }
 
         var user = await auth.RequireUser(ctx, Both);
+        await gateways.Load(db);
+        await mailSettings.Refresh(db);
         var isAdmin = user.Role == "admin";
         void AdminOnly() { if (!isAdmin) throw new HttpError(403, "Only administrators can do this."); }
         var actor = user.Email;
@@ -79,7 +84,7 @@ public static class AdminEndpoint
                       ISNULL(SUM(CASE WHEN payment_status = N'paid' AND created_at > DATEADD(day, -30, SYSDATETIMEOFFSET()) THEN 1 ELSE 0 END), 0) AS paid_30d
                     FROM dbo.orders");
                 var recent = await db.Rows("SELECT TOP 8 id, code, customer_name, city, total, status, payment_status, payment_method, created_at FROM dbo.orders ORDER BY created_at DESC, id DESC");
-                await Http.Send(ctx, 200, new { counts, stock = await Inventory.Levels(db), recent, gateways = GatewayStatus(gateways, config) });
+                await Http.Send(ctx, 200, new { counts, stock = await Inventory.Levels(db), recent, gateways = GatewayStatus(gateways, paySettings, Http.SiteUrl(ctx, config)) });
                 return;
             }
 
@@ -300,28 +305,190 @@ public static class AdminEndpoint
             case "gateways":
             {
                 AdminOnly();
-                await Http.Send(ctx, 200, new { gateways = GatewayStatus(gateways, config) });
+                await Http.Send(ctx, 200, new { gateways = GatewayStatus(gateways, paySettings, Http.SiteUrl(ctx, config)) });
+                return;
+            }
+            case "gateway-save":
+            {
+                AdminOnly();
+                Http.Method(ctx, "POST");
+                var b = await Http.Body(ctx);
+                var spec = PaymentSettings.Specs.FirstOrDefault(s => s.Id == Js.OrEmpty(b, "id")) ?? throw new HttpError(400, "Unknown payment gateway.");
+                var changes = new Dictionary<string, string>
+                {
+                    [spec.Prefix + "_ENABLED"] = Js.IsTrueOrTrueString(Js.Get(b, "enabled", out _)) ? "true" : "false",
+                };
+                if (spec.HasMode) changes[spec.Prefix + "_LIVE"] = Js.OrEmpty(b, "mode") == "live" ? "true" : "false";
+                var values = b["values"] as JsonObject ?? new JsonObject();
+                var clear = (b["clear"] as JsonArray)?.Select(n => Js.ToStr(n)).ToHashSet() ?? [];
+                foreach (var f in spec.Fields)
+                {
+                    var present = values.ContainsKey(f.Key);
+                    var v = present ? Js.ToStr(values[f.Key]).Trim() : "";
+                    if (v.Length > 300) throw new HttpError(400, $"{f.Label} is too long.");
+                    if (f.Secret)
+                    {
+                        if (v.Length > 0) changes[f.Key] = v;
+                        else if (clear.Contains(f.Key)) changes[f.Key] = "";
+                        continue;
+                    }
+                    if (!present) continue;
+                    if (f.Key.EndsWith("_BASE_URL") && v.Length > 0)
+                    {
+                        v = v.TrimEnd('/');
+                        var ok = Uri.TryCreate(v, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback));
+                        if (!ok) throw new HttpError(400, $"{f.Label} must be a full https:// address.");
+                    }
+                    changes[f.Key] = v;
+                }
+                await paySettings.Save(db, changes);
+                await Http.Send(ctx, 200, new { gateways = GatewayStatus(gateways, paySettings, Http.SiteUrl(ctx, config)) });
+                return;
+            }
+            case "gateway-test":
+            {
+                AdminOnly();
+                Http.Method(ctx, "POST");
+                var b = await Http.Body(ctx);
+                var g = gateways.Find(Js.OrEmpty(b, "id")) ?? throw new HttpError(400, "Unknown payment gateway.");
+                if (!g.Configured()) { await Http.Send(ctx, 200, new { ok = false, message = $"{g.Label} is switched off or some keys are missing. Save all the keys and switch it on first." }); return; }
+                var site = Http.SiteUrl(ctx, config);
+                var probe = new Order
+                {
+                    Code = "TEST-" + Random.Shared.Next(100000, 999999), CustomerName = "Connection test", Phone = "01700000000", Email = "test@example.com",
+                    Address = "Test address", City = "Dhaka", Subtotal = 10, Total = 10, PaymentMethod = g.Id,
+                    Items = [new OrderItem { Sku = "test", Name = "Connection test", Qty = 1, Price = 10 }],
+                };
+                try
+                {
+                    await g.Start(probe, a => $"{site}/api/payment?provider={g.Id}&action={a}&order={Uri.EscapeDataString(probe.Code)}", db);
+                    await Http.Send(ctx, 200, new { ok = true, message = $"Connected. {g.Label} accepted the test request. Nothing was charged." });
+                }
+                catch (Exception e)
+                {
+                    await Http.Send(ctx, 200, new { ok = false, message = e.Message });
+                }
+                return;
+            }
+            // ---------- email notifications ----------
+            case "mail":
+            {
+                AdminOnly();
+                await Http.Send(ctx, 200, await MailView(db, mailSettings));
+                return;
+            }
+            case "mail-save":
+            {
+                AdminOnly();
+                Http.Method(ctx, "POST");
+                var b = await Http.Body(ctx);
+                var changes = new Dictionary<string, string>();
+                var toggles = b["toggles"] as JsonObject ?? new JsonObject();
+                foreach (var k in MailSettings.Toggles)
+                    if (toggles.ContainsKey(k)) changes[k] = Js.IsTrueOrTrueString(toggles[k]) ? "true" : "false";
+                var provider = Js.OrEmpty(b, "provider");
+                if (provider.Length > 0)
+                {
+                    if (!MailSettings.Providers.Contains(provider)) throw new HttpError(400, "Choose an email provider.");
+                    changes["MAIL_PROVIDER"] = provider;
+                }
+                var values = b["values"] as JsonObject ?? new JsonObject();
+                var clear = (b["clear"] as JsonArray)?.Select(n => Js.ToStr(n)).ToHashSet() ?? [];
+                foreach (var f in mailSettings.All)
+                {
+                    var present = values.ContainsKey(f.Key);
+                    var v = present ? Js.ToStr(values[f.Key]).Trim() : "";
+                    if (v.Length > 300) throw new HttpError(400, $"{f.Label} is too long.");
+                    if (f.Secret)
+                    {
+                        if (v.Length > 0) changes[f.Key] = v;
+                        else if (clear.Contains(f.Key)) changes[f.Key] = "";
+                        continue;
+                    }
+                    if (!present) continue;
+                    if (f.Key is "MAIL_FROM_EMAIL" or "MAIL_REPLY_TO" or "MAIL_ADMIN_EMAIL" && v.Length > 0
+                        && !System.Text.RegularExpressions.Regex.IsMatch(v, @"^[^\s@]+@[^\s@]+\.[^\s@]+$"))
+                        throw new HttpError(400, $"{f.Label} must be a valid email address.");
+                    if (f.Key == "MAIL_SMTP_PORT" && v.Length > 0 && !(int.TryParse(v, out var port) && port is > 0 and < 65536))
+                        throw new HttpError(400, "SMTP port must be a number such as 587.");
+                    if (f.Key == "MAIL_API_URL" && v.Length > 0)
+                    {
+                        v = v.TrimEnd('/');
+                        if (!(Uri.TryCreate(v, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps)) throw new HttpError(400, "The API link must be a full https:// address.");
+                    }
+                    changes[f.Key] = v;
+                }
+                await mailSettings.Save(db, changes);
+                await Http.Send(ctx, 200, await MailView(db, mailSettings));
+                return;
+            }
+            case "mail-test":
+            {
+                AdminOnly();
+                Http.Method(ctx, "POST");
+                var b = await Http.Body(ctx);
+                var to = Js.OrEmpty(b, "to").Trim();
+                if (to.Length == 0) to = user.Email;
+                if (!System.Text.RegularExpressions.Regex.IsMatch(to, @"^[^\s@]+@[^\s@]+\.[^\s@]+$")) throw new HttpError(400, "Enter a valid email address to send the test to.");
+                var (ok, message) = await mailer.SendTest(db, to);
+                await Http.Send(ctx, 200, new { ok, message });
                 return;
             }
         }
         throw new HttpError(404, "Unknown request.");
     }
 
-    private static object GatewayStatus(Gateways gateways, IConfiguration config)
+    private static object GatewayStatus(Gateways gateways, PaymentSettings s, string site)
     {
-        var keys = new Dictionary<string, string[]>
+        return gateways.All.Select(g =>
         {
-            ["sslcommerz"] = ["SSLCOMMERZ_STORE_ID", "SSLCOMMERZ_STORE_PASSWORD", "SSLCOMMERZ_LIVE (optional)"],
-            ["bkash"] = ["BKASH_USERNAME", "BKASH_PASSWORD", "BKASH_APP_KEY", "BKASH_APP_SECRET", "BKASH_BASE_URL (live only)"],
-        };
-        return gateways.All.Select(g => new
-        {
-            id = g.Id,
-            label = g.Label,
-            configured = g.Configured(),
-            live = g.Id == "sslcommerz" ? config["SSLCOMMERZ_LIVE"] == "true" : g.Id == "bkash" && !string.IsNullOrEmpty(config["BKASH_BASE_URL"]),
-            env = keys.TryGetValue(g.Id, out var k) ? k : [],
+            var spec = PaymentSettings.Specs.FirstOrDefault(x => x.Id == g.Id);
+            var fields = (spec?.Fields ?? []).Select(f => new
+            {
+                key = f.Key, label = f.Label, secret = f.Secret, hint = f.Hint, placeholder = f.Placeholder,
+                value = f.Secret ? "" : s.Get(f.Key),
+                set = s.Get(f.Key).Length > 0,
+                from_admin = s.IsSaved(f.Key),
+            }).ToList();
+            var live = g.Id == "sslcommerz" ? s.Get("SSLCOMMERZ_LIVE") == "true" : g.Id == "bkash" && !string.IsNullOrEmpty(s.Get("BKASH_BASE_URL")) && !s.Get("BKASH_BASE_URL").Contains("sandbox");
+            var urls = g.Id == "sslcommerz"
+                ? new[]
+                {
+                    new { label = "IPN (notification) URL", url = $"{site}/api/payment?provider=sslcommerz&action=ipn", note = "Paste this in your SSLCommerz panel under IPN settings." },
+                    new { label = "Success URL", url = $"{site}/api/payment?provider=sslcommerz&action=success", note = "Sent automatically with every payment." },
+                    new { label = "Fail URL", url = $"{site}/api/payment?provider=sslcommerz&action=fail", note = "Sent automatically with every payment." },
+                    new { label = "Cancel URL", url = $"{site}/api/payment?provider=sslcommerz&action=cancel", note = "Sent automatically with every payment." },
+                }
+                : new[]
+                {
+                    new { label = "Callback URL", url = $"{site}/api/payment?provider={g.Id}&action=callback", note = "Sent automatically with every payment. Ask bKash to allow this address if they require it." },
+                };
+            return new
+            {
+                id = g.Id, label = g.Label, configured = g.Configured(), enabled = spec is null || s.Enabled(spec.Prefix),
+                live, has_mode = spec?.HasMode ?? false, mode = live ? "live" : "sandbox", fields, urls,
+            };
         }).ToList();
+    }
+
+    private static async Task<object> MailView(Db db, MailSettings s)
+    {
+        var fields = s.All.Select(f => new
+        {
+            key = f.Key, label = f.Label, secret = f.Secret, hint = f.Hint, placeholder = f.Placeholder,
+            group = MailSettings.Smtp.Contains(f) ? "smtp" : MailSettings.Api.Contains(f) ? "api" : "common",
+            value = f.Secret ? "" : s.Get(f.Key), set = s.Get(f.Key).Length > 0, from_admin = s.IsSaved(f.Key),
+        }).ToList();
+        var log = await db.Rows("SELECT TOP 25 id, order_code, kind, to_email, subject, status, error, created_at FROM dbo.email_log ORDER BY id DESC");
+        return new
+        {
+            enabled = s.Enabled, ready = s.Ready, provider = s.Provider, providers = MailSettings.Providers,
+            toggles = new Dictionary<string, bool>
+            {
+                ["MAIL_ON_PLACED"] = s.Flag("MAIL_ON_PLACED", true), ["MAIL_ON_PAYMENT"] = s.Flag("MAIL_ON_PAYMENT", true), ["MAIL_ON_STATUS"] = s.Flag("MAIL_ON_STATUS", true),
+            },
+            fields, log,
+        };
     }
 
     private sealed record Check(bool Ok, string Message);
@@ -344,7 +511,11 @@ public static class AdminEndpoint
                 await sp.GetRequiredService<Schema>().Ensure();
                 database = database with { Ok = true };
                 var n = await sp.GetRequiredService<Db>().Scalar<int>("SELECT COUNT(*) FROM dbo.users WHERE active = 1");
+                var db = sp.GetRequiredService<Db>();
+                var wasSeeded = await db.Scalar<int>("SELECT COUNT(*) FROM dbo.app_state WHERE [key] = N'admin_seeded'") > 0;
                 if (n > 0) admin = admin with { Ok = true };
+                else if (wasSeeded && (config["ADMIN_RESEED"] ?? "").Trim().ToLowerInvariant() != "true")
+                    admin = admin with { Message = "There is no administrator account (it was deleted). To create it again, set ADMIN_RESEED to true in appsettings.json and restart the server." };
                 else if (email.Length == 0) admin = admin with { Message = "No admin account yet, and ADMIN_EMAIL is not set." };
                 else if (password.Length < 10) admin = admin with { Message = password.Length > 0 ? "ADMIN_PASSWORD must have at least 10 characters." : "No admin account yet, and ADMIN_PASSWORD is not set." };
                 else admin = admin with { Message = "Settings found but no account yet. Restart the server, then reload this page." };

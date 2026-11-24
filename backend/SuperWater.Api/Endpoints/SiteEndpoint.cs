@@ -44,8 +44,10 @@ public static class SiteEndpoint
         {
             var input = await Http.Body(ctx);
             var site = Http.SiteUrl(ctx, sp.GetRequiredService<IConfiguration>());
+            var signedIn = await sp.GetRequiredService<Auth>().CurrentCustomer(ctx);
             var created = await orders.Create(input,
-                (provider, act, code) => $"{site}/api/payment?provider={provider}&action={act}&order={Uri.EscapeDataString(code)}");
+                (provider, act, code) => $"{site}/api/payment?provider={provider}&action={act}&order={Uri.EscapeDataString(code)}",
+                signedIn?.Id);
             var content = await Content.All(db);
             await Http.Send(ctx, 201, new Dictionary<string, object?>
             {
@@ -67,13 +69,39 @@ public static class SiteEndpoint
         }
 
         // ---------- customer accounts ----------
-        if (action is "register" or "login" or "logout" or "me" or "profile")
+        if (action is "register" or "login" or "logout" or "me" or "profile" or "password" or "my-orders" or "track")
         {
             var auth = sp.GetRequiredService<Auth>();
             if (action == "me")
             {
                 Http.Method(ctx, "GET");
                 await Http.Send(ctx, 200, new { customer = CustomerView(await auth.CurrentCustomer(ctx)) });
+                return;
+            }
+            if (action == "my-orders")
+            {
+                Http.Method(ctx, "GET");
+                var who = await auth.CurrentCustomer(ctx) ?? throw new HttpError(401, "Please sign in.");
+                var mine = await db.Query<Order>("SELECT TOP 100 * FROM dbo.orders WHERE customer_id = @id ORDER BY created_at DESC", new { id = who.Id });
+                await Http.Send(ctx, 200, new { orders = mine.Select(MyOrderView) }, new Dictionary<string, string> { ["Cache-Control"] = "no-store" });
+                return;
+            }
+            if (action == "track")
+            {
+                Http.Method(ctx, "GET");
+                var failed = await auth.CheckLoginRate(ctx);
+                var who = await auth.CurrentCustomer(ctx);
+                var code = Http.Q(q, "code").Trim().ToUpperInvariant();
+                var phone = Http.Q(q, "phone");
+                var o = code.Length == 0 ? null : await db.One<Order>("SELECT * FROM dbo.orders WHERE code = @code", new { code });
+                var owns = o is not null && who is not null && o.CustomerId == who.Id;
+                var phoneOk = o is not null && Orders.PhoneTail(phone).Length >= 10 && Orders.PhoneTail(phone) == Orders.PhoneTail(o.Phone);
+                if (o is null || !(owns || phoneOk))
+                {
+                    await failed();
+                    throw new HttpError(404, "We could not find an order with those details. Check the order code and the mobile number used for the order.");
+                }
+                await Http.Send(ctx, 200, MyOrderView(o), new Dictionary<string, string> { ["Cache-Control"] = "no-store" });
                 return;
             }
             Http.Method(ctx, "POST");
@@ -87,11 +115,19 @@ public static class SiteEndpoint
             if (action == "profile")
             {
                 var me = await auth.CurrentCustomer(ctx) ?? throw new HttpError(401, "Please sign in.");
+                var rawPhone = Http.Str(b, "phone", "Mobile number", 20);
+                var savedPhone = "";
+                if (rawPhone.Length > 0)
+                {
+                    savedPhone = Orders.NormalizePhone(rawPhone) ?? throw new HttpError(400, "Enter a valid Bangladeshi mobile number, for example 01712345678.");
+                    if (await db.Scalar<int>("SELECT COUNT(*) FROM dbo.customers WHERE phone = @p AND id <> @id", new { p = savedPhone, id = me.Id }) > 0)
+                        throw new HttpError(409, "Another account already uses this mobile number.");
+                }
                 var upd = new
                 {
                     id = me.Id,
                     name = Http.Str(b, "name", "Name", 80, required: true),
-                    phone = Http.Str(b, "phone", "Mobile number", 20),
+                    phone = savedPhone,
                     address = Http.Str(b, "address", "Address", 300),
                     city = Http.Str(b, "city", "Area or city", 60),
                 };
@@ -99,16 +135,43 @@ public static class SiteEndpoint
                 await Http.Send(ctx, 200, new { customer = CustomerView(await auth.CurrentCustomer(ctx)) });
                 return;
             }
+            if (action == "password")
+            {
+                var me = await auth.CurrentCustomer(ctx) ?? throw new HttpError(401, "Please sign in.");
+                var current = Js.OrEmpty(b, "current");
+                var next = Js.OrEmpty(b, "next");
+                var fail = await auth.CheckLoginRate(ctx);
+                if (!Auth.VerifyPassword(current, me.PasswordHash)) { await fail(); throw new HttpError(400, "Your current password is not correct."); }
+                if (next.Length < 8) throw new HttpError(400, "The new password must be at least 8 characters.");
+                if (next.Length > 200) throw new HttpError(400, "The new password is too long.");
+                var hash = Auth.HashPassword(next);
+                await db.Execute("UPDATE dbo.customers SET password_hash=@hash WHERE id=@id", new { hash, id = me.Id });
+                await Http.Send(ctx, 200, new { ok = true },
+                    new Dictionary<string, string> { ["Set-Cookie"] = auth.CustomerSessionCookie(me.Id, hash, ctx) });
+                return;
+            }
             var recordFailure = await auth.CheckLoginRate(ctx);
-            var email = Http.Str(b, "email", "Email", 254, required: true).ToLowerInvariant();
             var password = Js.OrEmpty(b, "password");
             if (action == "login")
             {
-                var c = await db.One<CustomerRow>("SELECT * FROM dbo.customers WHERE email = @email", new { email });
+                // Customers sign in with their email or their mobile number.
+                var ident = Js.OrEmpty(b, "identifier").Trim();
+                if (ident.Length == 0) ident = Js.OrEmpty(b, "email").Trim();
+                if (ident.Length == 0) throw new HttpError(400, "Enter your email or mobile number.");
+                if (ident.Length > 254) throw new HttpError(400, "That is too long.");
+                var byEmail = ident.Contains('@');
+                var loginEmail = byEmail ? ident.ToLowerInvariant() : "";
+                CustomerRow? c;
+                if (byEmail) c = await db.One<CustomerRow>("SELECT * FROM dbo.customers WHERE email = @email", new { email = loginEmail });
+                else
+                {
+                    var ph = Orders.NormalizePhone(ident);
+                    c = ph is null ? null : await db.One<CustomerRow>("SELECT TOP 1 * FROM dbo.customers WHERE phone = @ph", new { ph });
+                }
                 if (c is null || !Auth.VerifyPassword(password, c.PasswordHash))
                 {
-                    // Staff / admin sign in from the same form and are sent to /admin.
-                    var staff = await db.One<UserRow>("SELECT * FROM dbo.users WHERE email = @email AND active = 1", new { email });
+                    // Staff / admin sign in from the same form (with their email) and are sent to /admin.
+                    var staff = byEmail ? await db.One<UserRow>("SELECT * FROM dbo.users WHERE email = @email AND active = 1", new { email = loginEmail }) : null;
                     if (staff is not null && Auth.VerifyPassword(password, staff.PasswordHash))
                     {
                         await Http.Send(ctx, 200, new { staff = true, redirect = "/admin" },
@@ -116,21 +179,29 @@ public static class SiteEndpoint
                         return;
                     }
                     await recordFailure();
-                    throw new HttpError(401, "That email and password do not match an account.");
+                    throw new HttpError(401, "That email or mobile number and password do not match an account.");
                 }
                 await Http.Send(ctx, 200, new { customer = CustomerView(c) },
                     new Dictionary<string, string> { ["Set-Cookie"] = auth.CustomerSessionCookie(c.Id, c.PasswordHash, ctx) });
                 return;
             }
             // register
+            var email = Http.Str(b, "email", "Email", 254, required: true).ToLowerInvariant();
             if (!System.Text.RegularExpressions.Regex.IsMatch(email, @"^[^\s@]+@[^\s@]+\.[^\s@]+$")) throw new HttpError(400, "Enter a valid email address.");
             if (password.Length < 8) throw new HttpError(400, "Password must be at least 8 characters.");
             if (password.Length > 200) throw new HttpError(400, "Password is too long.");
+            var regPhone = Orders.NormalizePhone(Http.Str(b, "phone", "Mobile number", 20, required: true))
+                           ?? throw new HttpError(400, "Enter a valid Bangladeshi mobile number, for example 01712345678.");
+            if (await db.Scalar<int>("SELECT COUNT(*) FROM dbo.customers WHERE phone = @p", new { p = regPhone }) > 0)
+            {
+                await recordFailure();
+                throw new HttpError(409, "An account with this mobile number already exists. Please sign in.");
+            }
             var reg = new
             {
                 email,
                 name = Http.Str(b, "name", "Name", 80, required: true),
-                phone = Http.Str(b, "phone", "Mobile number", 20),
+                phone = regPhone,
                 address = Http.Str(b, "address", "Address", 300),
                 city = Http.Str(b, "city", "Area or city", 60),
                 hash = Auth.HashPassword(password),
@@ -154,6 +225,16 @@ public static class SiteEndpoint
 
         throw new HttpError(404, "Unknown request.");
     }
+
+    /// <summary>An order as its owner sees it, including the private link to the full receipt.</summary>
+    private static object MyOrderView(Order o) => new
+    {
+        code = o.Code, token = o.PublicToken, status = o.Status, payment_status = o.PaymentStatus, payment_method = o.PaymentMethod,
+        items = o.Items.Select(i => new { name = i.Name, qty = i.Qty, price = i.Price }),
+        subtotal = o.Subtotal, delivery_fee = o.DeliveryFee, total = o.Total,
+        customer_name = o.CustomerName, phone = o.Phone, email = o.Email, note = o.Note,
+        city = o.City, address = o.Address, created_at = o.CreatedAt,
+    };
 
     private static object? CustomerView(CustomerRow? c) => c is null ? null : new { c.Id, c.Email, c.Name, c.Phone, c.Address, c.City };
 }

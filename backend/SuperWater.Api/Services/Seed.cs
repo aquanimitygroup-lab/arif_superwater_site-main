@@ -31,15 +31,22 @@ public static class Seed
         foreach (var size in Inventory.Sizes)
             await c.ExecuteAsync("IF NOT EXISTS (SELECT 1 FROM dbo.stock WHERE size_ml = @size) INSERT INTO dbo.stock (size_ml) VALUES (@size)", new { size });
 
-        // First administrator, created from settings when no one exists yet.
+        // The first administrator is created from the settings ONCE, when the database is new. It is remembered in
+        // app_state, so deleting the user later does not bring the account back (and the password from appsettings
+        // stops working). To create it again on purpose, set ADMIN_RESEED to true and restart.
         var n = await c.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM dbo.users");
+        var seeded = await c.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM dbo.app_state WHERE [key] = N'admin_seeded'") > 0;
         var email = (config["ADMIN_EMAIL"] ?? "").Trim().ToLowerInvariant();
         var password = config["ADMIN_PASSWORD"] ?? "";
-        if (n == 0 && email.Length > 0 && password.Length >= 10)
+        var reseed = (config["ADMIN_RESEED"] ?? "").Trim().ToLowerInvariant() == "true";
+        if (n == 0 && (!seeded || reseed) && email.Length > 0 && password.Length >= 10)
         {
             await c.ExecuteAsync(@"IF NOT EXISTS (SELECT 1 FROM dbo.users WHERE email = @email)
                                    INSERT INTO dbo.users (email, name, role, password_hash) VALUES (@email, N'Administrator', N'admin', @hash)",
                 new { email, hash = Auth.HashPassword(password) });
+            n = 1;
         }
+        if (n > 0 && !seeded)
+            await c.ExecuteAsync("INSERT INTO dbo.app_state ([key], value) VALUES (N'admin_seeded', N'true')");
     }
 }

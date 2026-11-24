@@ -1,27 +1,14 @@
 import { useEffect, useState } from 'react';
+import { describe } from '../site/orderStatus.js';
+import { DownloadIcon, ReceiptModal, downloadReceipt } from '../site/Receipt.jsx';
 
 const tk = (n) => 'Tk ' + Number(n).toLocaleString('en-IN');
 
-/** What the customer is told for each order state (same wording as before). */
-function describe(o) {
-  const online = o.payment_method !== 'cod';
-  if (o.status === 'cancelled' && online && o.payment_status === 'failed')
-    return { title: "Payment didn't go through", msg: 'Your payment was not completed, so this order was cancelled and you have not been charged. You can try again from the shop.', state: 'Cancelled', cls: 'bad' };
-  if (o.status === 'cancelled')
-    return { title: 'Order cancelled', msg: 'This order has been cancelled. Contact us if you think this is a mistake.', state: 'Cancelled', cls: 'bad' };
-  if (online && o.payment_status !== 'paid')
-    return { title: 'Confirming your payment', msg: "We're waiting for the payment provider to confirm. Refresh this page in a minute.", state: 'Payment pending', cls: '' };
-  if (o.status === 'delivered')
-    return { title: 'Delivered', msg: 'Your Super Water has been delivered. Enjoy!', state: 'Delivered', cls: 'good' };
-  if (o.status === 'dispatched')
-    return { title: 'On its way', msg: 'Your order has left our facility and is on its way to you.', state: 'Dispatched', cls: 'good' };
-  if (online)
-    return { title: 'Payment received', msg: 'Thank you! Your order is confirmed and will be dispatched soon.', state: 'Paid', cls: 'good' };
-  return { title: 'Order received', msg: "Thank you! We'll call you shortly to confirm your order and delivery time. Please keep the cash ready on delivery.", state: o.status === 'confirmed' ? 'Confirmed' : 'Received', cls: '' };
-}
-
 export default function OrderApp() {
   const [data, setData] = useState(null); // { order } | { error }
+  // The link in the order emails opens this page with the receipt already showing (?receipt=1).
+  const [showReceipt, setShowReceipt] = useState(() => new URLSearchParams(location.search).get('receipt') === '1');
+  const [dlBusy, setDlBusy] = useState(false);
 
   useEffect(() => {
     const p = new URLSearchParams(location.search);
@@ -68,7 +55,12 @@ export default function OrderApp() {
           <tr className="total"><td>Total</td><td className="r">{tk(o.total)}</td></tr>
         </tbody>
       </table>
+      <div className="o-actions">
+        <button type="button" className="rc-btn primary" onClick={() => setShowReceipt(true)}>Receipt</button>
+        <button type="button" className="rc-btn" disabled={dlBusy} onClick={async () => { setDlBusy(true); try { await downloadReceipt(o); } catch (e) { alert('Could not create the PDF. Please try again.'); } finally { setDlBusy(false); } }}><DownloadIcon />{dlBusy ? 'Preparing PDF…' : 'Download receipt'}</button>
+      </div>
       <a className="btn" href={o.status === 'cancelled' ? '/#shop' : '/'}>{o.status === 'cancelled' ? 'Back to the shop' : 'Back to Super Water'}</a>
+      {showReceipt ? <ReceiptModal order={o} onClose={() => setShowReceipt(false)} secondary={{ label: 'Close', onClick: () => setShowReceipt(false) }} /> : null}
     </>);
   }
 

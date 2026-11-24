@@ -24,16 +24,16 @@ namespace SuperWater.Api.Payments;
 /// bKash returns them to our callback with ?paymentID=…&amp;status=success|failure|cancel.
 /// On success we execute the payment; it only counts when transactionStatus is "Completed".
 /// </summary>
-public sealed class BkashGateway(IConfiguration config) : IPaymentGateway
+public sealed class BkashGateway(PaymentSettings config) : IPaymentGateway
 {
-    private string Env(string k) => (config[k] ?? "").Trim();
+    private string Env(string k) => config.Get(k);
     private string Base => (Env("BKASH_BASE_URL") is { Length: > 0 } b ? b : "https://tokenized.sandbox.bka.sh/v2/tokenized-checkout").TrimEnd('/');
 
     public string Id => "bkash";
     public string Label => "bKash";
     public bool NeedsEmail => false;
 
-    public bool Configured() => new[] { "BKASH_USERNAME", "BKASH_PASSWORD", "BKASH_APP_KEY", "BKASH_APP_SECRET" }.All(k => Env(k).Length > 0);
+    public bool Configured() => config.Enabled("BKASH") && new[] { "BKASH_USERNAME", "BKASH_PASSWORD", "BKASH_APP_KEY", "BKASH_APP_SECRET" }.All(k => Env(k).Length > 0);
 
     private async Task<JsonObject> Call(string path, Dictionary<string, string> headers, JsonObject body)
     {

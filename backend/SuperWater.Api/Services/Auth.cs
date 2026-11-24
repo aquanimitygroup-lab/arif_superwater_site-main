@@ -78,9 +78,19 @@ public sealed class Auth(IConfiguration config, IWebHostEnvironment env, Db db)
             ["v"] = Tail(passwordHash),
             ["exp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + SessionHours * 3600_000L,
         });
-        var secure = ctx.Request.IsHttps || ctx.Request.Headers["x-forwarded-proto"].ToString().Contains("https") || env.IsProduction() ? "; Secure" : "";
+        var secure = UseSecure(ctx) ? "; Secure" : "";
         return $"{Cookie}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SessionHours * 3600}{secure}";
     }
+
+    /// <summary>
+    /// Mark cookies Secure only when the visitor really is on HTTPS (directly, through a proxy that says so, or when
+    /// the configured SITE_URL is https). A Secure cookie set over plain HTTP is silently dropped by the browser,
+    /// which made people look signed out after a reload.
+    /// </summary>
+    private bool UseSecure(HttpContext ctx) =>
+        ctx.Request.IsHttps
+        || ctx.Request.Headers["x-forwarded-proto"].ToString().Contains("https")
+        || (env.IsProduction() && (config["SITE_URL"] ?? "").StartsWith("https://", StringComparison.OrdinalIgnoreCase));
 
     public static string ClearCookie() => $"{Cookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
     // ---------- website customers (separate cookie, same signing) ----------
@@ -96,7 +106,7 @@ public sealed class Auth(IConfiguration config, IWebHostEnvironment env, Db db)
             ["v"] = Tail(passwordHash),
             ["exp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + CustomerDays * 86400_000L,
         });
-        var secure = ctx.Request.IsHttps || ctx.Request.Headers["x-forwarded-proto"].ToString().Contains("https") || env.IsProduction() ? "; Secure" : "";
+        var secure = UseSecure(ctx) ? "; Secure" : "";
         return $"{CustomerCookieName}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={CustomerDays * 86400}{secure}";
     }
 

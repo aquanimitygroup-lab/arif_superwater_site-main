@@ -18,7 +18,9 @@ public static class PaymentEndpoint
         var db = sp.GetRequiredService<Db>();
         var orders = sp.GetRequiredService<Orders>();
         var q = Http.Query(ctx);
-        var g = sp.GetRequiredService<Gateways>().Find(Http.Q(q, "provider"));
+        var all = sp.GetRequiredService<Gateways>();
+        await all.Load(db);
+        var g = all.Find(Http.Q(q, "provider"));
         if (g is null || !g.Configured()) throw new HttpError(404, "Unknown payment provider.");
 
         var action = Http.Q(q, "action");

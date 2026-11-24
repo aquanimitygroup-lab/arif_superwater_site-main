@@ -15,13 +15,25 @@ DapperSetup.Configure();
 builder.Services.AddSingleton<Schema>();
 builder.Services.AddScoped<Db>();
 builder.Services.AddScoped<Auth>();
+builder.Services.AddSingleton<MailSettings>();
+builder.Services.AddSingleton<SiteUrlHolder>();
+builder.Services.AddSingleton<OrderMailer>();
 builder.Services.AddScoped<Orders>();
+builder.Services.AddSingleton<PaymentSettings>();
 builder.Services.AddSingleton<IPaymentGateway, SslCommerzGateway>();
 builder.Services.AddSingleton<IPaymentGateway, BkashGateway>();
 // To add another gateway, see Payments/TemplateGateway.cs, then register it here.
 builder.Services.AddSingleton<Gateways>();
 
 var app = builder.Build();
+
+// Remember the public address of the site, so links in emails point to the right place.
+var siteUrlHolder = app.Services.GetRequiredService<SiteUrlHolder>();
+app.Use(async (ctx, next) =>
+{
+    if (string.IsNullOrEmpty(app.Configuration["SITE_URL"])) siteUrlHolder.Value = Http.SiteUrl(ctx, app.Configuration);
+    await next();
+});
 
 // ---------- headers (same rules as the original vercel.json) ----------
 app.Use(async (ctx, next) =>

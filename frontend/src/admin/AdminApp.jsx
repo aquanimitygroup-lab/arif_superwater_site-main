@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, toast, fail, tk, size, when, StatusPill, PAY_LABEL, setUnauthorizedHandler, setToastHandler } from './lib.jsx';
-import { Overview, Orders, Inventory, Content, Products, Payments, People, Account } from './sections.jsx';
+import { Overview, Orders, Inventory, Content, Products, Payments, Emails, People, Account } from './sections.jsx';
 
 // ---------- navigation ----------
 const SECTIONS = [
@@ -10,6 +10,7 @@ const SECTIONS = [
   { id: 'content', title: 'Website content', roles: ['admin'], C: Content },
   { id: 'products', title: 'Products & prices', roles: ['admin'], C: Products },
   { id: 'payments', title: 'Payments & connections', roles: ['admin'], C: Payments },
+  { id: 'emails', title: 'Email notifications', roles: ['admin'], C: Emails },
   { id: 'people', title: 'People', roles: ['admin'], C: People },
   { id: 'account', title: 'My account', roles: ['admin', 'production'], C: Account },
 ];
@@ -137,10 +138,19 @@ export default function AdminApp() {
   }, []);
 
   const boot = useCallback(async () => {
-    try {
-      const { user } = await api('me');
-      setMe(user); setMode('app');
-    } catch { setMode('login'); }
+    // Only a real "not signed in" answer (401) shows the sign-in page. A server that is restarting or a network blip is retried,
+    // so reloading the page never signs the admin out by accident.
+    for (let i = 0; i < 5; i++) {
+      try {
+        const { user } = await api('me');
+        setMe(user); setMode('app');
+        return;
+      } catch (e) {
+        if (e.status === 401) { setMode('login'); return; }
+        await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+      }
+    }
+    setMode('login');
   }, []);
   useEffect(() => { boot(); }, [boot]);
 
@@ -176,7 +186,7 @@ export default function AdminApp() {
     } catch (e) { fail(e); }
   };
 
-  const logout = async () => { await api('logout', { method: 'POST' }).catch(() => {}); setMe(null); setMode('login'); };
+  const logout = async () => { await api('logout', { method: 'POST' }).catch(() => {}); setMe(null); window.location.replace('/'); };
 
   return (<>
     {mode === 'login' && <Login onSignedIn={boot} />}

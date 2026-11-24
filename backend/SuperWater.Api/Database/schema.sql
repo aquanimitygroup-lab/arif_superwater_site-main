@@ -117,6 +117,14 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'orders_created' AND obje
 CREATE INDEX orders_created ON dbo.orders (created_at DESC);
 GO
 
+-- Links an order to the signed-in customer who placed it (guest orders stay NULL).
+IF COL_LENGTH(N'dbo.orders', N'customer_id') IS NULL
+ALTER TABLE dbo.orders ADD customer_id INT NULL;
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'orders_customer' AND object_id = OBJECT_ID(N'dbo.orders'))
+CREATE INDEX orders_customer ON dbo.orders (customer_id, created_at DESC);
+GO
+
 -- Raw record of every message from a payment gateway, for auditing.
 IF OBJECT_ID(N'dbo.payment_events', N'U') IS NULL
 CREATE TABLE dbo.payment_events (
@@ -139,6 +147,20 @@ CREATE TABLE dbo.app_state (
   [key]      NVARCHAR(200)  NOT NULL CONSTRAINT pk_app_state PRIMARY KEY,
   value      NVARCHAR(MAX)  NOT NULL,  -- JSON
   updated_at DATETIMEOFFSET NOT NULL CONSTRAINT df_app_state_updated DEFAULT SYSDATETIMEOFFSET()
+);
+GO
+
+-- Every email the shop tried to send (order updates, alerts, tests), so problems are visible in the admin.
+IF OBJECT_ID(N'dbo.email_log', N'U') IS NULL
+CREATE TABLE dbo.email_log (
+  id          INT IDENTITY(1,1) NOT NULL CONSTRAINT pk_email_log PRIMARY KEY,
+  order_code  NVARCHAR(40)   NULL,
+  kind        NVARCHAR(40)   NOT NULL,   -- placed, paid, payment_failed, confirmed, dispatched, delivered, cancelled, refunded, admin_alert, test
+  to_email    NVARCHAR(254)  NOT NULL,
+  subject     NVARCHAR(300)  NOT NULL,
+  status      NVARCHAR(20)   NOT NULL,   -- sent, failed, skipped
+  error       NVARCHAR(1000) NULL,
+  created_at  DATETIMEOFFSET NOT NULL CONSTRAINT df_email_log_created DEFAULT SYSDATETIMEOFFSET()
 );
 GO
 

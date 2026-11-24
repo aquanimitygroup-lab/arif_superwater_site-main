@@ -180,3 +180,40 @@ pre.code { background: var(--navy); color: #E7F6FB; padding: 14px 16px; border-r
 .setup li b { font-weight: 800; }
 .setup .ok { color: var(--good); }
 .setup .no { color: var(--bad); }
+
+/* ---------- payments ---------- */
+.pay-card { display: grid; gap: 4px; }
+.pay-card .check { margin: 12px 0 4px; }
+.mode-row { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; }
+.mode-opt { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border: 1.5px solid var(--line); border-radius: 10px; font-weight: 700; font-size: 14px; cursor: pointer; margin: 0; }
+.mode-opt.on { border-color: var(--cyan); background: var(--info-bg); }
+.mode-opt input { accent-color: var(--navy); }
+.pay-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+.pay-fields .wide { grid-column: 1 / -1; }
+.pay-fields label { display: block; margin-bottom: 4px; }
+.pay-fields small.hint { display: block; margin-top: 4px; }
+.secret-row { display: flex; gap: 8px; align-items: center; }
+.secret-row input { flex: 1; min-width: 0; }
+.pay-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.test-result { font-weight: 700; font-size: 14px; padding: 10px 14px; border-radius: 10px; margin: 0 0 12px; }
+.test-result.ok { background: var(--good-bg); color: var(--good); }
+.test-result.bad { background: var(--bad-bg); color: var(--bad); }
+.pay-urls { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.pay-urls summary { cursor: pointer; font-weight: 700; font-size: 14px; }
+.copy-line { display: grid; gap: 6px; margin-top: 12px; }
+.copy-line small { display: block; color: var(--ink-2); font-size: 12.5px; }
+.copy-box { display: flex; gap: 8px; align-items: center; }
+.copy-box code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; background: var(--ice); padding: 9px 12px; border-radius: 9px; font-size: 12.5px; }
+@media (max-width: 720px) { .pay-fields { grid-template-columns: 1fr; } }
+
+/* ---------- email notifications ---------- */
+.mail-h { font-size: 14px; margin: 20px 0 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-2); }
+.mode-opt.prov { align-items: flex-start; flex: 1 1 200px; }
+.mode-opt.prov span { display: flex; flex-direction: column; gap: 2px; }
+.mode-opt.prov small { font-weight: 500; color: var(--ink-2); font-size: 12.5px; }
+.mail-toggles { display: grid; gap: 10px; }
+.mail-toggle { align-items: flex-start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; }
+.mail-toggle span { display: flex; flex-direction: column; gap: 2px; }
+.mail-toggle small { font-weight: 500; color: var(--ink-2); font-size: 12.5px; }
+.test-row input { flex: 1; min-width: 0; }
+.mail-err { display: block; margin-top: 4px; color: var(--bad); font-size: 12px; max-width: 340px; white-space: normal; }

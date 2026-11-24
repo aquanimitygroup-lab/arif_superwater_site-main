@@ -114,9 +114,9 @@ export function Inventory({ refresh, setActions }) {
       </FormCard>
     </div>
     <div><h2 style={{ fontSize: 17, margin: '4px 0 12px' }}>Stock history (latest 100)</h2>
-      <div className="table-wrap">{movements.length ? <table>
+      <div className="table-wrap"><table>
         <thead><tr><th>When</th><th>Size</th><th>What happened</th><th className="r">At facility</th><th className="r">Reserved</th><th>Reference</th><th>By</th></tr></thead>
-        <tbody>{movements.map((m) => (
+        <tbody>{!movements.length ? <tr><td colSpan={7} className="empty">No stock changes yet. Record the first production run above.</td></tr> : movements.map((m) => (
           <tr key={m.id}>
             <td className="muted">{when(m.created_at)}</td><td>{size(m.size_ml)}</td><td>{REASONS[m.reason] || m.reason}{m.note ? <div className="muted">{m.note}</div> : null}</td>
             <td className="r num">{m.on_hand_change ? <span className={`pill ${m.on_hand_change > 0 ? 'change-pos' : 'change-neg'}`}>{`${m.on_hand_change > 0 ? '+' : ''}${m.on_hand_change}`}</span> : '—'}</td>
@@ -124,7 +124,7 @@ export function Inventory({ refresh, setActions }) {
             <td>{m.ref || '—'}</td><td className="muted">{m.actor || '—'}</td>
           </tr>
         ))}</tbody>
-      </table> : <p className="empty">No stock changes yet. Record the first production run above.</p>}</div>
+      </table></div>
     </div>
   </>)}</Loading>;
 }
@@ -238,23 +238,105 @@ export function Products() {
 }
 
 // ---------- payments & connections ----------
+function CopyLine({ label, url, note }) {
+  const copy = async () => { try { await navigator.clipboard.writeText(url); toast('Copied.'); } catch { toast('Select the address and copy it.', true); } };
+  return (
+    <div className="copy-line">
+      <div><b>{label}</b>{note ? <small>{note}</small> : null}</div>
+      <div className="copy-box"><code>{url}</code><button type="button" className="btn small" onClick={copy}>Copy</button></div>
+    </div>
+  );
+}
+
+function GatewayCard({ g, onSaved }) {
+  const [enabled, setEnabled] = useState(g.enabled);
+  const [mode, setMode] = useState(g.mode);
+  const [values, setValues] = useState(() => Object.fromEntries(g.fields.filter((f) => !f.secret).map((f) => [f.key, f.value])));
+  const [secrets, setSecrets] = useState({});
+  const [clear, setClear] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState(null); // { ok, message }
+  const [err, setErr] = useState('');
+
+  const save = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(''); setResult(null);
+    try {
+      const out = await api('gateway-save', { method: 'POST', data: { id: g.id, enabled, mode, values: { ...values, ...secrets }, clear } });
+      setSecrets({}); setClear([]);
+      onSaved(out.gateways);
+      toast(`${g.label} settings saved.`);
+    } catch (x) { setErr(x.message); } finally { setBusy(false); }
+  };
+  const test = async () => {
+    setTesting(true); setResult(null); setErr('');
+    try { setResult(await api('gateway-test', { method: 'POST', data: { id: g.id } })); }
+    catch (x) { setResult({ ok: false, message: x.message }); } finally { setTesting(false); }
+  };
+  const status = !g.configured ? (enabled ? <span className="pill off">Keys missing</span> : <span className="pill off">Switched off</span>)
+    : <span className="pill ok">{g.live ? 'Connected · live' : 'Connected · test mode'}</span>;
+
+  return (
+    <div className="card pay-card">
+      <div className="toolbar"><h2>{g.label}</h2>{status}</div>
+      <p className="hint">{g.id === 'sslcommerz'
+        ? 'Cards, bKash, Nagad, Rocket and internet banking through SSLCommerz.'
+        : 'Customers pay with their bKash wallet (Tokenized Checkout).'}</p>
+      <form noValidate onSubmit={save}>
+        <p><label className="check" htmlFor={`en-${g.id}`}><input type="checkbox" id={`en-${g.id}`} checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />Offer {g.label} at checkout</label></p>
+        {g.has_mode ? (
+          <div className="mode-row" role="radiogroup" aria-label="Mode">
+            {[['sandbox', 'Sandbox (test)'], ['live', 'Live (real payments)']].map(([v, l]) => (
+              <label key={v} className={`mode-opt${mode === v ? ' on' : ''}`}><input type="radio" name={`mode-${g.id}`} checked={mode === v} onChange={() => setMode(v)} />{l}</label>
+            ))}
+          </div>
+        ) : null}
+        <div className="pay-fields">
+          {g.fields.map((f) => (
+            <div key={f.key} className={f.key.endsWith('_BASE_URL') ? 'wide' : ''}>
+              <label htmlFor={`${g.id}-${f.key}`}>{f.label}</label>
+              {f.secret ? (
+                <div className="secret-row">
+                  <input id={`${g.id}-${f.key}`} type="password" autoComplete="new-password" placeholder={f.set && !clear.includes(f.key) ? '•••••••• saved. Type to replace' : 'Not set'}
+                    value={secrets[f.key] || ''} onChange={(e) => setSecrets((x) => ({ ...x, [f.key]: e.target.value }))} />
+                  {f.set && !clear.includes(f.key) && f.from_admin
+                    ? <button type="button" className="btn small danger" onClick={() => setClear((c) => [...c, f.key])}>Remove</button> : null}
+                  {clear.includes(f.key) ? <button type="button" className="btn small" onClick={() => setClear((c) => c.filter((k) => k !== f.key))}>Undo</button> : null}
+                </div>
+              ) : (
+                <input id={`${g.id}-${f.key}`} type="text" autoComplete="off" spellCheck="false" placeholder={f.placeholder}
+                  value={values[f.key] ?? ''} onChange={(e) => setValues((x) => ({ ...x, [f.key]: e.target.value }))} />
+              )}
+              <small className="hint">{f.hint}{!f.from_admin && f.set ? ' Currently coming from the server settings.' : ''}</small>
+            </div>
+          ))}
+        </div>
+        {err ? <p className="form-error">{err}</p> : <p className="form-error"></p>}
+        {result ? <p className={`test-result ${result.ok ? 'ok' : 'bad'}`} role="status">{result.ok ? '✓ ' : '✕ '}{result.message}</p> : null}
+        <div className="pay-actions">
+          <button className="btn primary" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save settings'}</button>
+          <button className="btn" type="button" onClick={test} disabled={testing || busy}>{testing ? 'Testing…' : 'Test connection'}</button>
+        </div>
+      </form>
+      <details className="pay-urls">
+        <summary>Website addresses for {g.label}</summary>
+        <p className="hint">If the gateway asks where to send customers back or notify you, use these.</p>
+        {g.urls.map((u) => <CopyLine key={u.label} {...u} />)}
+      </details>
+    </div>
+  );
+}
+
 export function Payments() {
   const state = useLoad(() => api('gateways'));
   const origin = location.origin;
-  return <Loading state={state}>{({ gateways }) => (<>
+  const [gateways, setGateways] = useState(null);
+  useEffect(() => { if (state.data) setGateways(state.data.gateways); }, [state.data]);
+  return <Loading state={state}>{() => (<>
     <div className="card"><h2>How payments work</h2>
-      <p className="hint">Cash on delivery works now. An online gateway appears at checkout as soon as its keys are added to the server settings (appsettings.json or environment variables) and the server is restarted. Switch payment methods on or off under Website content → Ordering.</p></div>
-    {gateways.map((g) => (
-      <div className="card" key={g.id}>
-        <div className="toolbar"><h2>{g.label}</h2>{g.configured ? <span className="pill ok">{g.live ? 'Connected · live' : 'Connected · test mode'}</span> : <span className="pill off">Not connected</span>}</div>
-        <p className="hint">Settings:</p>
-        <pre className="code">{g.env.join('\n')}</pre>
-        <p className="hint">If the gateway asks for your website addresses, use:</p>
-        <pre className="code">{g.id === 'sslcommerz'
-          ? `IPN (notification) URL: ${origin}/api/payment?provider=sslcommerz&action=ipn\nThe success, fail and cancel addresses are sent automatically with each payment.`
-          : `Callback addresses are sent automatically with each payment:\n${origin}/api/payment?provider=${g.id}&action=callback`}</pre>
-      </div>
-    ))}
+      <p className="hint">At checkout customers choose <b>SSLCommerz</b>, <b>bKash</b> or <b>Cash on delivery</b>. Enter your gateway keys and API links below and they apply immediately, with no server restart. Turn Cash on delivery and online payment on or off under Website content → Ordering. Use <b>Test connection</b> after saving: it asks the gateway for a test session and never charges anyone.</p></div>
+    {gateways ? gateways.map((g) => <GatewayCard key={g.id + (g.configured ? '1' : '0') + g.fields.map((f) => f.value + f.set).join('|')} g={g} onSaved={setGateways} />) : null}
     <div className="card"><h2>Production facility connection</h2>
       <p className="hint">Facility staff can sign in here with a Production account (People → Add person). If the facility has its own software, it can send production and stock counts directly using the facility API key (FACILITY_API_KEY in the server settings).</p>
       <pre className="code">{`# Stock levels and orders waiting for dispatch
@@ -316,6 +398,132 @@ export function People({ refresh, setActions }) {
           <td className="r"><button className="btn small" type="button" onClick={() => setEditing({ ...u, key: Date.now() })}>Edit</button></td></tr>
       ))}</tbody>
     </table></div>
+  </>)}</Loading>;
+}
+
+// ---------- email notifications ----------
+const PROVIDERS = [
+  { id: 'smtp', name: 'SMTP', desc: 'Your own mail server or Gmail, Zoho, Outlook…' },
+  { id: 'resend', name: 'Resend', desc: 'Simple email API (resend.com)' },
+  { id: 'sendgrid', name: 'SendGrid', desc: 'Email API (sendgrid.com)' },
+  { id: 'brevo', name: 'Brevo', desc: 'Email API (brevo.com, formerly Sendinblue)' },
+];
+const TOGGLES = [
+  ['MAIL_ON_PLACED', 'Order received', 'When a customer places an order.'],
+  ['MAIL_ON_PAYMENT', 'Payment updates', 'Payment received, payment failed and refunds.'],
+  ['MAIL_ON_STATUS', 'Order progress', 'Confirmed, dispatched, delivered and cancelled.'],
+];
+
+function EmailForm({ d, me, onSaved }) {
+  const [enabled, setEnabled] = useState(d.enabled);
+  const [provider, setProvider] = useState(d.provider);
+  const [toggles, setToggles] = useState(d.toggles);
+  const [values, setValues] = useState(() => Object.fromEntries(d.fields.filter((f) => !f.secret).map((f) => [f.key, f.value])));
+  const [secrets, setSecrets] = useState({});
+  const [clear, setClear] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [to, setTo] = useState(me.email || '');
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const field = (f) => (
+    <div key={f.key} className={f.key === 'MAIL_FOOTER' || f.key === 'MAIL_API_URL' ? 'wide' : ''}>
+      <label htmlFor={`m-${f.key}`}>{f.label}</label>
+      {f.secret ? (
+        <div className="secret-row">
+          <input id={`m-${f.key}`} type="password" autoComplete="new-password" placeholder={f.set && !clear.includes(f.key) ? '•••••••• saved. Type to replace' : 'Not set'}
+            value={secrets[f.key] || ''} onChange={(e) => setSecrets((x) => ({ ...x, [f.key]: e.target.value }))} />
+          {f.set && !clear.includes(f.key) && f.from_admin ? <button type="button" className="btn small danger" onClick={() => setClear((c) => [...c, f.key])}>Remove</button> : null}
+          {clear.includes(f.key) ? <button type="button" className="btn small" onClick={() => setClear((c) => c.filter((k) => k !== f.key))}>Undo</button> : null}
+        </div>
+      ) : (
+        <input id={`m-${f.key}`} type="text" autoComplete="off" spellCheck="false" placeholder={f.placeholder} value={values[f.key] ?? ''}
+          onChange={(e) => setValues((x) => ({ ...x, [f.key]: e.target.value }))} />
+      )}
+      <small className="hint">{f.hint}{!f.from_admin && f.set ? ' Currently coming from the server settings.' : ''}</small>
+    </div>
+  );
+
+  const save = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(''); setResult(null);
+    try {
+      const out = await api('mail-save', { method: 'POST', data: { provider, toggles: { MAIL_ENABLED: enabled, ...toggles }, values: { ...values, ...secrets }, clear } });
+      setSecrets({}); setClear([]); onSaved(out); toast('Email settings saved.');
+    } catch (x) { setErr(x.message); } finally { setBusy(false); }
+  };
+  const test = async () => {
+    setTesting(true); setResult(null);
+    try { setResult(await api('mail-test', { method: 'POST', data: { to } })); onSaved(await api('mail')); }
+    catch (x) { setResult({ ok: false, message: x.message }); } finally { setTesting(false); }
+  };
+  const group = (g) => d.fields.filter((f) => f.group === g);
+  const status = !d.enabled ? <span className="pill off">Switched off</span> : d.ready ? <span className="pill ok">On · sending emails</span> : <span className="pill pending">Not set up</span>;
+
+  return (<>
+    <form className="card pay-card" noValidate onSubmit={save}>
+      <div className="toolbar"><h2>Email notifications</h2>{status}</div>
+      <p className="hint">Customers get an email when they place an order, when payment succeeds or fails, and whenever the order is confirmed, dispatched, delivered, cancelled or refunded. Each email has a button to track the order. Emails go to the address on the order (or the customer's account email).</p>
+      <p><label className="check" htmlFor="mail-en"><input type="checkbox" id="mail-en" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />Send email notifications</label></p>
+
+      <h3 className="mail-h">1. Email service</h3>
+      <div className="mode-row" role="radiogroup" aria-label="Email provider">
+        {PROVIDERS.map((p) => (
+          <label key={p.id} className={`mode-opt prov${provider === p.id ? ' on' : ''}`}>
+            <input type="radio" name="mail-provider" checked={provider === p.id} onChange={() => setProvider(p.id)} />
+            <span><b>{p.name}</b><small>{p.desc}</small></span>
+          </label>
+        ))}
+      </div>
+      <div className="pay-fields">{(provider === 'smtp' ? group('smtp') : group('api')).map(field)}</div>
+
+      <h3 className="mail-h">2. Sender</h3>
+      <div className="pay-fields">{group('common').map(field)}</div>
+
+      <h3 className="mail-h">3. What to send</h3>
+      <div className="mail-toggles">
+        {TOGGLES.map(([k, label, hint]) => (
+          <label key={k} className="check mail-toggle" htmlFor={`t-${k}`}>
+            <input type="checkbox" id={`t-${k}`} checked={toggles[k]} onChange={(e) => setToggles((t) => ({ ...t, [k]: e.target.checked }))} />
+            <span><b>{label}</b><small>{hint}</small></span>
+          </label>
+        ))}
+      </div>
+      <p className="form-error">{err}</p>
+      <div className="pay-actions"><button className="btn primary" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save settings'}</button></div>
+    </form>
+
+    <div className="card">
+      <h2>Send a test email</h2>
+      <p className="hint">Save your settings first, then send yourself a test to make sure everything works.</p>
+      <div className="copy-box test-row">
+        <input type="email" value={to} onChange={(e) => setTo(e.target.value)} placeholder="you@example.com" aria-label="Send the test email to" />
+        <button type="button" className="btn primary" onClick={test} disabled={testing}>{testing ? 'Sending…' : 'Send test email'}</button>
+      </div>
+      {result ? <p className={`test-result ${result.ok ? 'ok' : 'bad'}`} role="status" style={{ marginTop: 12 }}>{result.ok ? '✓ ' : '✕ '}{result.message}</p> : null}
+    </div>
+  </>);
+}
+
+export function Emails({ me }) {
+  const state = useLoad(() => api('mail'));
+  const [data, setData] = useState(null);
+  useEffect(() => { if (state.data) setData(state.data); }, [state.data]);
+  return <Loading state={state}>{() => (<>
+    {data ? <EmailForm key={data.provider + data.fields.map((f) => f.value + f.set).join('|') + data.enabled} d={data} me={me} onSaved={setData} /> : null}
+    {data ? (
+      <div className="card"><h2>Recent emails</h2>
+        <p className="hint">The last 25 emails the shop tried to send. A red "Failed" shows what the email service said.</p>
+        <div className="table-wrap"><table>
+          <thead><tr><th>When</th><th>To</th><th>Email</th><th>Order</th><th>Result</th></tr></thead>
+          <tbody>{!data.log.length ? <tr><td colSpan={5} className="empty">No emails sent yet.</td></tr> : data.log.map((l) => (
+            <tr key={l.id}><td>{when(l.created_at)}</td><td>{l.to_email}</td><td>{l.subject}</td><td>{l.order_code || '—'}</td>
+              <td><span className={`pill ${l.status === 'sent' ? 'ok' : l.status === 'failed' ? 'failed' : 'off'}`}>{l.status[0].toUpperCase() + l.status.slice(1)}</span>{l.error ? <small className="mail-err">{l.error}</small> : null}</td></tr>
+          ))}</tbody>
+        </table></div>
+      </div>
+    ) : null}
   </>)}</Loading>;
 }
 

@@ -18,8 +18,8 @@ export async function api(action, { method = 'GET', data, params = {} } = {}) {
     credentials: 'same-origin',
   });
   const body = await r.json().catch(() => ({}));
-  if (r.status === 401 && action !== 'login') { onUnauthorized(); throw new Error(body.error || 'Please sign in.'); }
-  if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
+  if (r.status === 401 && action !== 'login') { onUnauthorized(); throw Object.assign(new Error(body.error || 'Please sign in.'), { status: 401 }); }
+  if (!r.ok) throw Object.assign(new Error(body.error || `Request failed (${r.status})`), { status: r.status });
   return body;
 }
 
@@ -61,11 +61,11 @@ export function StockTiles({ stock }) {
 }
 
 export function OrdersTable({ rows, onOpen }) {
-  if (!rows.length) return <div className="table-wrap"><p className="empty">No orders here yet.</p></div>;
+  // The column names stay visible even when there are no orders yet.
   return (
     <div className="table-wrap"><table>
       <thead><tr><th>Order</th><th>Customer</th><th>Placed</th><th>Payment</th><th>Status</th><th className="r">Total</th></tr></thead>
-      <tbody>{rows.map((o) => (
+      <tbody>{!rows.length ? <tr><td colSpan={6} className="empty">No orders here yet.</td></tr> : rows.map((o) => (
         <tr key={o.id} className="clickable" tabIndex={0} onClick={() => onOpen(o.id)} onKeyDown={(e) => e.key === 'Enter' && onOpen(o.id)}>
           <td><b>{o.code}</b></td>
           <td>{o.customer_name}<div className="muted">{o.city}</div></td>

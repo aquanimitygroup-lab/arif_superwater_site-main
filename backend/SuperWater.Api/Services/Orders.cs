@@ -13,13 +13,14 @@ public sealed record PaymentMethod(string Id, string Label, [property: System.Te
 public sealed record CheckoutOptions(List<PaymentMethod> Methods, int DeliveryFee, int FreeOver, List<string> Areas);
 
 /// <summary>Orders from the website, payments and staff actions (port of lib/orders.js).</summary>
-public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
+public sealed class Orders(Db db, Gateways gateways, OrderMailer mailer, ILogger<Orders> log)
 {
     private const int UnpaidOnlineExpiryHours = 2;
 
     /// <summary>Payment choices offered at checkout right now.</summary>
     public async Task<CheckoutOptions> CheckoutOptions(JsonObject? content = null)
     {
+        await gateways.Load(db);
         var c = content ?? await Content.All(db);
         var methods = new List<PaymentMethod>();
         if (Content.Bool(c, "order.cod_enabled")) methods.Add(new(Gateways.CodId, Gateways.CodLabel, false));
@@ -57,7 +58,7 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
     /// Creates an order from the website. Prices always come from the database,
     /// never from the browser. Stock is reserved in the same transaction.
     /// </summary>
-    public async Task<Created> Create(JsonObject input, Func<string, string, string, string> returnUrlFor)
+    public async Task<Created> Create(JsonObject input, Func<string, string, string, string> returnUrlFor, int? customerId = null)
     {
         var options = await CheckoutOptions();
         var method = Js.OrEmpty(input, "payment_method");
@@ -106,14 +107,14 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
                 {
                     var code = NewCode();
                     var row = await tx.One<Order>(@"
-                        INSERT INTO dbo.orders (code, public_token, customer_name, phone, email, address, city, note,
+                        INSERT INTO dbo.orders (code, public_token, customer_id, customer_name, phone, email, address, city, note,
                                                 items, subtotal, delivery_fee, total, payment_method, payment_status)
                         OUTPUT INSERTED.*
-                        VALUES (@code, @token, @customerName, @phone, @email, @address, @city, @note,
+                        VALUES (@code, @token, @customerId, @customerName, @phone, @email, @address, @city, @note,
                                 @items, @subtotal, @deliveryFee, @total, @method, @paymentStatus)",
                         new
                         {
-                            code, token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
+                            code, token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(), customerId,
                             customerName, phone, email, address, city, note,
                             items = JsonSerializer.Serialize(items, Http.JsonOptions), subtotal, deliveryFee, total,
                             method, paymentStatus = method == Gateways.CodId ? "unpaid" : "pending",
@@ -129,7 +130,11 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
         }
         if (order is null) throw new HttpError(500, "Could not create the order. Please try again.");
 
-        if (method == Gateways.CodId) return new Created(order, null);
+        if (method == Gateways.CodId)
+        {
+            mailer.Notify("placed", order);
+            return new Created(order, null);
+        }
 
         // Online payment: start it with the gateway.
         var g = gateways.Find(method)!;
@@ -162,10 +167,12 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
     public async Task<Order?> ApplyPayment(HandleResult result, string provider)
     {
         if (string.IsNullOrEmpty(result.OrderCode) || result.Outcome == "pending") return null;
-        return await db.Begin(async tx =>
+        Order? before = null;
+        var after = await db.Begin(async tx =>
         {
             var o = await tx.One<Order>("SELECT * FROM dbo.orders WITH (UPDLOCK, ROWLOCK) WHERE code = @code", new { code = result.OrderCode });
             if (o is null || o.PaymentMethod != provider) return null;
+            before = o;
             if (result.Outcome == "paid")
             {
                 if (o.PaymentStatus == "paid") return o;
@@ -188,6 +195,13 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
             await Inventory.Release(tx, o, provider);
             return await tx.One<Order>("UPDATE dbo.orders SET payment_status = N'failed', status = N'cancelled', updated_at = SYSDATETIMEOFFSET() OUTPUT INSERTED.* WHERE id = @id", new { id = o.Id });
         });
+        // Tell the customer, once, when the payment result actually changed the order.
+        if (after is not null && before is not null)
+        {
+            if (before.PaymentStatus != "paid" && after.PaymentStatus == "paid") mailer.Notify("paid", after);
+            else if (before.Status != "cancelled" && after.Status == "cancelled" && after.PaymentStatus == "failed") mailer.Notify("payment_failed", after);
+        }
+        return after;
     }
 
     /// <summary>Online orders never paid within the time limit are cancelled and their stock returned.</summary>
@@ -209,8 +223,20 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
         return stale.Count;
     }
 
-    /// <summary>Status changes made by staff in the admin.</summary>
-    public Task<Order> StaffAction(int orderId, string action, string actor) => db.Begin(async tx =>
+    /// <summary>Status changes made by staff in the admin. The customer is emailed about the change.</summary>
+    public async Task<Order> StaffAction(int orderId, string action, string actor)
+    {
+        var o = await StaffActionCore(orderId, action, actor);
+        var kind = action switch
+        {
+            "confirm" => "confirmed", "dispatch" => "dispatched", "deliver" => "delivered", "cancel" => "cancelled",
+            "mark_paid" => "paid", "mark_refunded" => "refunded", _ => null,
+        };
+        if (kind is not null) mailer.Notify(kind, o);
+        return o;
+    }
+
+    private Task<Order> StaffActionCore(int orderId, string action, string actor) => db.Begin(async tx =>
     {
         var o = await tx.One<Order>("SELECT * FROM dbo.orders WITH (UPDLOCK, ROWLOCK) WHERE id = @id", new { id = orderId })
                 ?? throw new HttpError(404, "Order not found.");
@@ -249,6 +275,20 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
         }
     });
 
+    /// <summary>A Bangladeshi mobile number as 01XXXXXXXXX (accepts +880 / 880 / spaces / dashes), or null if it is not valid.</summary>
+    public static string? NormalizePhone(string? raw)
+    {
+        var digits = Regex.Replace(Regex.Replace(raw ?? "", @"[^\d+]", ""), @"^\+?88", "");
+        return Regex.IsMatch(digits, @"^01[3-9]\d{8}$") ? digits : null;
+    }
+
+    /// <summary>Last 10 digits of a phone number, for comparing numbers written in different formats.</summary>
+    public static string PhoneTail(string? s)
+    {
+        var d = Regex.Replace(s ?? "", @"\D", "");
+        return d.Length > 10 ? d[^10..] : d;
+    }
+
     /// <summary>What the customer may see about their own order.</summary>
     public static object PublicOrder(Order o) => new
     {
@@ -256,5 +296,7 @@ public sealed class Orders(Db db, Gateways gateways, ILogger<Orders> log)
         items = o.Items.Select(i => new { name = i.Name, qty = i.Qty, price = i.Price }),
         subtotal = o.Subtotal, delivery_fee = o.DeliveryFee, total = o.Total,
         customer_name = o.CustomerName, city = o.City, created_at = o.CreatedAt,
+        // Shown on the receipt. Only the holder of the private order link can see these.
+        phone = o.Phone, email = o.Email, address = o.Address, note = o.Note,
     };
 }
