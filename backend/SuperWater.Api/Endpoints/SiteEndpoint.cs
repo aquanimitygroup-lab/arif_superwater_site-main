@@ -75,7 +75,10 @@ public static class SiteEndpoint
             if (action == "me")
             {
                 Http.Method(ctx, "GET");
-                await Http.Send(ctx, 200, new { customer = CustomerView(await auth.CurrentCustomer(ctx)) });
+                var cust = await auth.CurrentCustomer(ctx);
+                var staffUser = cust is null ? await auth.CurrentStaff(ctx) : null;
+                await Http.Send(ctx, 200, new { customer = CustomerView(cust), staff = staffUser is null ? null : new { staffUser.Email, staffUser.Name, staffUser.Role } },
+                    new Dictionary<string, string> { ["Cache-Control"] = "no-store" });
                 return;
             }
             if (action == "my-orders")

@@ -88,6 +88,7 @@ export default function SiteApp() {
   const [toastState, setToastState] = useState({ msg: '', show: false });
   const [symbol, setSymbol] = useState({ sym: 'K', label: 'Potassium' });
   // Start from the last known signed-in customer so a reload does not flash the Login button; the server confirms it below.
+  const [staff, setStaff] = useState(null); // an admin/staff member browsing the site: shown as signed in, never logged out
   const [customer, setCustomer] = useState(() => { try { return JSON.parse(localStorage.getItem('sw-me') || 'null'); } catch (e) { return null; } });
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState('login'); // login | register
@@ -320,7 +321,7 @@ export default function SiteApp() {
     let alive = true;
     (async () => {
       for (let i = 0; i < 5 && alive; i++) {
-        try { const d = await accountCall('me'); if (alive) setCustomer(d.customer); return; }
+        try { const d = await accountCall('me'); if (alive) { setCustomer(d.customer); setStaff(d.staff || null); } return; }
         catch (e) { await sleep(700 * (i + 1)); }
       }
     })();
@@ -527,7 +528,9 @@ export default function SiteApp() {
         <div className="nav-right">
           {customer
             ? <AccountMenu customer={customer} onOpen={setAcctTab} onSignOut={signOut} />
-            : <span className="acct"><button type="button" className="acct-btn primary" onClick={() => openAuth('login')}>Login</button></span>}
+            : staff
+              ? <span className="acct"><a className="acct-btn primary" href="/admin" title={staff.email}>Admin panel</a></span>
+              : <span className="acct"><button type="button" className="acct-btn primary" onClick={() => openAuth('login')}>Login</button></span>}
           <button className="cart-btn" id="cartBtn" ref={refs.cartBtn} aria-label="Open cart" onClick={openCart}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 7h12l-1 13H7L6 7Z" /><path d="M9 7a3 3 0 0 1 6 0" /></svg>
             <span className="cart-label">Cart</span>

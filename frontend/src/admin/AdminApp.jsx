@@ -196,14 +196,14 @@ export default function AdminApp() {
         <aside className="side">
           <div className="brand">
             <img src="/assets/aquanimity-white.png" alt="Aquanimity" />
-            <span className="sw"><span>Super</span><span>Water</span></span>
+            <img className="sw-logo" src="/assets/sw-en-v2.png" alt="Super Water" width="769" height="337" />
           </div>
           <nav id="nav" aria-label="Admin sections">
             {allowed.map((s) => <a key={s.id} href={`#${s.id}`} data-id={s.id} className={s.id === section.id ? 'on' : undefined}>{s.title}</a>)}
           </nav>
           <div className="side-foot">
             <div id="whoami" className="who">{`${me.email} · ${me.role === 'admin' ? 'Administrator' : 'Production'}`}</div>
-            <a href="/" target="_blank" rel="noopener" className="side-link">View website ↗</a>
+            <a href="/" target="_blank" rel="noopener noreferrer" className="side-link">View website ↗</a>
             <button id="logout" className="side-link" type="button" onClick={logout}>Sign out</button>
           </div>
         </aside>

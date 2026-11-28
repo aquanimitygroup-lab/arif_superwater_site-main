@@ -48,6 +48,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--cyan); outline: 
 .side { background: var(--navy); color: #fff; display: flex; flex-direction: column; padding: 22px 14px; position: sticky; top: 0; height: 100vh; }
 .brand { display: flex; flex-direction: column; gap: 4px; padding: 0 10px 22px; }
 .brand img { height: 20px; width: auto; align-self: flex-start; }
+.brand img.sw-logo { height: 48px; margin-top: 2px; }
 .sw { display: inline-flex; flex-direction: column; font-weight: 900; font-style: italic; text-transform: uppercase; line-height: .84; letter-spacing: -.02em; color: var(--cyan); font-size: 22px; }
 .sw span:first-child { font-size: .76em; }
 #nav { display: grid; gap: 2px; }

@@ -7,3 +7,10 @@ publish/
 .vs/
 *.user
 backend/SuperWater.Api/appsettings.Development.json
+
+# Deploy profiles (contain credentials)
+backend/**/Properties/PublishProfiles/
+*.pubxml
+*.pubxml.user
+appsettings.*.json
+!appsettings.json

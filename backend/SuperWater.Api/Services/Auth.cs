@@ -79,7 +79,8 @@ public sealed class Auth(IConfiguration config, IWebHostEnvironment env, Db db)
             ["exp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + SessionHours * 3600_000L,
         });
         var secure = UseSecure(ctx) ? "; Secure" : "";
-        return $"{Cookie}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SessionHours * 3600}{secure}";
+        // Lax (not Strict) so the session survives opening the website from the admin panel in a new tab; writes are still protected by the x-sw-admin header.
+        return $"{Cookie}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SessionHours * 3600}{secure}";
     }
 
     /// <summary>
@@ -92,7 +93,7 @@ public sealed class Auth(IConfiguration config, IWebHostEnvironment env, Db db)
         || ctx.Request.Headers["x-forwarded-proto"].ToString().Contains("https")
         || (env.IsProduction() && (config["SITE_URL"] ?? "").StartsWith("https://", StringComparison.OrdinalIgnoreCase));
 
-    public static string ClearCookie() => $"{Cookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
+    public static string ClearCookie() => $"{Cookie}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
     // ---------- website customers (separate cookie, same signing) ----------
     private const string CustomerCookieName = "sw_customer";
     private const int CustomerDays = 30;
@@ -121,6 +122,17 @@ public sealed class Auth(IConfiguration config, IWebHostEnvironment env, Db db)
         if (!Js.IsInteger(uid)) return null;
         var c = await db.One<CustomerRow>("SELECT * FROM dbo.customers WHERE id = @id", new { id = (int)uid });
         return c is null || Tail(c.PasswordHash) != Js.ToStr(payload["v"]) ? null : c;
+    }
+
+    /// <summary>The signed-in staff/admin user (read-only check, never throws), or null.</summary>
+    public async Task<UserRow?> CurrentStaff(HttpContext ctx)
+    {
+        var payload = Unsign(ctx.Request.Cookies[Cookie]);
+        if (payload is null || payload["k"] is not null) return null;
+        var uid = Js.ToNumber(payload, "uid");
+        if (!Js.IsInteger(uid)) return null;
+        var user = await db.One<UserRow>("SELECT id, email, name, role, password_hash, active FROM dbo.users WHERE id = @id", new { id = (int)uid });
+        return user is null || !user.Active || Tail(user.PasswordHash) != Js.ToStr(payload["v"]) ? null : user;
     }
 
     /// <summary>
